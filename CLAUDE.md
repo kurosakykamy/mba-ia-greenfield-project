@@ -10,7 +10,7 @@ More info in the project overview: [docs/project-plan.md](docs/project-plan.md)
 
 This is a monorepo with two main areas:
 
-- `nestjs-project/` — Backend API (NestJS 11, TypeScript, Express). Contains modules for users, channels, videos, comments, etc.
+- `nestjs-project/` — Backend API (NestJS 11, TypeScript, Express) and the video worker. Contains modules for auth, users, channels, videos, storage and mail.
 - `docs/` — Project documentation, architecture diagrams, and planning.
 - `next-frontend/` (Next.js) — not yet initialized
 
@@ -19,12 +19,23 @@ This is a monorepo with two main areas:
 See `docs/diagrams/software-arch.mermaid` for the full diagram. Key containers:
 
 - **Frontend** (Next.js) → calls API via REST, streams from Object Storage
-- **API** (Nest.js) → business rules, auth, reads/writes DB, uploads to storage, publishes jobs to queue, sends emails
+- **API** (Nest.js) → business rules, auth, reads/writes DB, authorizes direct-to-storage uploads, publishes jobs to queue, sends emails
 - **Video Worker** (FFmpeg) → consumes jobs from queue, processes videos, updates DB and storage
 - **Database** (PostgreSQL) → users, channels, videos, comments, likes
-- **Object Storage** (S3/MinIO) → video files and thumbnails
-- **Message Queue** (TBD) → video processing job queue
+- **Object Storage** (S3-compatible) → video files and thumbnails. LocalStack S3 locally, AWS S3 in production
+- **Message Queue** (BullMQ over Redis) → video processing job queue
 - **Email Service** (SMTP) → account confirmation and password recovery
+
+### Video pipeline (Phase 03)
+
+The API never carries video bytes. Uploads go straight from the client to object storage via
+presigned multipart URLs; the API orchestrates and records. Playback and download are a `302`
+to a short-lived presigned URL, so storage — not the API — serves `Range` requests. Processing
+(duration, metadata, thumbnail) runs in the worker container, which reads the file directly
+from a presigned URL instead of downloading it.
+
+Details, endpoints and the status lifecycle are documented in
+[nestjs-project/CLAUDE.md](nestjs-project/CLAUDE.md) → "Videos (Phase 03)".
 
 ## Docker Networking
 

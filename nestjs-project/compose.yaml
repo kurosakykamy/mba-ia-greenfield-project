@@ -1,6 +1,6 @@
 services:
   nestjs-api:
-    build: 
+    build:
       context: .
       dockerfile: Dockerfile.dev
     ports:
@@ -12,6 +12,24 @@ services:
         condition: service_healthy
       mailpit:
         condition: service_started
+      storage:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  video-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    volumes:
+      - .:/home/node/app
+    depends_on:
+      db:
+        condition: service_healthy
+      storage:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   db:
     image: postgres:17
@@ -33,4 +51,37 @@ services:
       - "1025:1025"
       - "8025:8025"
 
+  # Object storage S3-compatível. LocalStack emula o S3 da AWS (multipart upload,
+  # URLs pré-assinadas, requisições Range, lifecycle), que é o alvo de produção.
+  storage:
+    # Tag fixada na major 4: a tag `latest` aponta para a edição Pro, que exige
+    # LOCALSTACK_AUTH_TOKEN e sai com código 55 sem licença.
+    image: localstack/localstack:4
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3
+      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=streamtube
+      - AWS_SECRET_ACCESS_KEY=streamtube
+    volumes:
+      - storage-data:/var/lib/localstack
+    healthcheck:
+      test:
+        ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
+  redis:
+    image: redis:8-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  storage-data:

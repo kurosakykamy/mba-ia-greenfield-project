@@ -13,8 +13,10 @@ docker compose ps   # all services must show status "running"
 Then verify each infrastructure service is actually ready to accept connections — not just running:
 
 - **PostgreSQL:** `docker compose exec db pg_isready -U streamtube` — expect `accepting connections`
+- **Redis:** `docker compose exec redis redis-cli ping` — expect `PONG`
+- **Object storage:** `docker compose exec nestjs-api curl -sf http://storage:4566/_localstack/health` — expect a JSON body with `"s3": "available"`
 
-Only start the NestJS dev server (`npm run start:dev`) when the user **explicitly** asks to run the application — never as part of "start the environment".
+Only start the NestJS dev server (`npm run start:dev`) when the user **explicitly** asks to run the application — never as part of "start the environment". The same rule applies to the video worker (`npm run worker`).
 
 ## Development Environment
 
@@ -33,7 +35,11 @@ docker compose exec nestjs-api npm run start:dev
 
 Services:
 - `nestjs-api` — NestJS API, port `3000`
+- `video-worker` — video processing worker (consumes the queue; has FFmpeg)
 - `db` — PostgreSQL 17, port `5432`, database `streamtube`, user/password `streamtube`
+- `storage` — LocalStack S3 (object storage), port `4566`, bucket `streamtube`
+- `redis` — Redis 8, port `6379`, backs the BullMQ processing queue
+- `mailpit` — SMTP capture, SMTP `1025`, web UI/API `8025`
 
 All verification and teardown commands run on the **host machine**:
 
@@ -62,6 +68,8 @@ docker compose down
 npm run start:dev                        # Dev server with hot-reload
 npm run build                            # Compile to dist/
 npm run start:prod                       # Run compiled build
+npm run worker                           # Video worker (run inside video-worker, not nestjs-api)
+npm run worker:dev                       # Video worker with watch mode
 
 npm test                                 # Unit tests
 npm run test:watch                       # Unit tests in watch mode
@@ -148,6 +156,83 @@ NestJS with standard module structure. Source lives in `src/`, compiled output i
 
 - Each domain feature gets its own module (e.g., `UsersModule`, `VideosModule`) registered in `AppModule`
 - Controllers handle HTTP routing; Services hold business logic; both are scoped to their module
+
+### Two entrypoints
+
+`src/main.ts` boots the HTTP API. `src/worker.ts` boots the **video worker** via
+`NestFactory.createApplicationContext(WorkerModule)` — no HTTP server, no controllers, no guards:
+it only consumes the processing queue. Both share the same codebase, entities and config
+namespaces; they differ in their root module (`AppModule` vs `WorkerModule`) and their image
+(`Dockerfile.dev` vs `Dockerfile.worker`).
+
+## Videos (Phase 03)
+
+Video upload, background processing and delivery. Source in `src/videos/` and `src/storage/`.
+
+### Upload never passes through the API
+
+A 10GB file would stall the API if it were proxied through it. Instead the client uploads
+straight to object storage using presigned multipart URLs; the API only orchestrates:
+
+```
+POST /videos                → creates the draft + opens the multipart upload,
+                              returns one presigned URL per part
+  client PUTs each part  ──────────────────────► object storage (API not involved)
+POST /videos/:id/complete   → completes the multipart, verifies the object exists,
+                              moves the video to `processing`, enqueues the job
+```
+
+A single S3 PUT tops out below 10GB, which is why the upload is multipart rather than a
+single presigned PUT.
+
+### Endpoints (`src/videos/videos.controller.ts`)
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/videos` | Start an upload; pre-registers the video as a draft |
+| POST | `/videos/:id/complete` | Finish the upload; enqueues processing |
+| GET | `/videos/:slug` | Video metadata by its unique URL identifier |
+| GET | `/videos/:slug/stream` | `302` to a presigned URL; storage serves `Range`/`206` |
+| GET | `/videos/:slug/download` | Same, with `response-content-disposition=attachment` |
+
+All of them sit behind the global `JwtAuthGuard` — none is `@Public()`. Anonymous viewing is
+a Phase 05 capability.
+
+### Processing (`src/videos/video-processing.processor.ts`)
+
+The worker consumes the `video-processing` queue (BullMQ over Redis). For each job it reads
+the video from the database by id — the payload carries only `{ videoId }` — then:
+
+1. `ffprobe` reads **directly from a presigned URL**, so a 10GB file is never downloaded to
+   extract duration and metadata.
+2. `ffmpeg` grabs a frame as the thumbnail and uploads it to storage.
+3. The video moves to `ready` with `duration_seconds`, `metadata` and `thumbnail_key` set.
+
+Failure is handled by the queue's own retry (`attempts: 3`, exponential backoff). Only after
+attempts are exhausted does the video become `failed`, with `failure_reason` persisted — a
+failed video never blocks the rest of the queue.
+
+### Status lifecycle
+
+`draft` → `processing` → `ready` | `failed`, persisted on the `videos` table.
+
+### Storage layout (`src/storage/`)
+
+One bucket (`streamtube`), everything for a video under the same prefix:
+
+```
+videos/{videoId}/source.{ext}
+videos/{videoId}/thumbnail.jpg
+```
+
+`StorageService` wraps the S3 client; `storage.util.ts` owns the key convention. Incomplete
+multipart uploads are expired by a bucket lifecycle rule, so abandoned parts don't pile up.
+
+### Unique URL
+
+Each video gets a short URL-safe `slug` (nanoid, 12 chars, no visually ambiguous characters).
+Uniqueness is enforced by a `UNIQUE` constraint; collisions retry inside a SAVEPOINT, the same
+pattern `ChannelsService` uses for channel nicknames.
 
 ## Code Conventions
 

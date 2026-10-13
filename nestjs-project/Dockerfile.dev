@@ -1,6 +1,10 @@
 FROM node:25.6.0-slim
 
-RUN apt update && apt install -y procps curl
+# ffmpeg entra na imagem de DEV (não na de produção da API) porque a suíte de
+# testes roda neste container, e os testes de integração do worker exercitam
+# ffprobe/ffmpeg de verdade. Sem o binário aqui, esses testes seriam pulados —
+# e a extração de metadados e a geração de thumbnail ficariam sem cobertura real.
+RUN apt update && apt install -y procps curl ffmpeg
 
 WORKDIR /home/node/app
 

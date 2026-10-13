@@ -1,0 +1,17 @@
+FROM node:25.6.0-slim
+
+# ffmpeg/ffprobe são o motor do worker de vídeo: extração de metadados e geração
+# de thumbnail — aqui eles são dependência de runtime, não de teste.
+#
+# A imagem desta fase é idêntica à `Dockerfile.dev` porque aquela também instala
+# ffmpeg, para que a suíte de testes (que roda no container da API) exercite o
+# processamento de verdade. Os arquivos continuam separados de propósito: numa
+# imagem de produção a API não precisaria de ffmpeg, e só este Dockerfile
+# precisaria mantê-lo.
+RUN apt update && apt install -y procps curl ffmpeg
+
+WORKDIR /home/node/app
+
+USER node
+
+CMD [ "tail", "-f", "/dev/null" ]
